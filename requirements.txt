@@ -1,0 +1,9 @@
+
+# Núcleo
+pandas>=2.0
+numpy>=1.24
+ccxt>=4.3.88
+
+# Opcionais (melhoram a parte ARIMA+GARCH)
+statsmodels>=0.14
+arch>=6.2
