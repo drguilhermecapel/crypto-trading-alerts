@@ -1,0 +1,8 @@
+include config.example.json
+include portfolio.example.json
+include requirements.txt
+include requirements-dev.txt
+include CHANGELOG.md
+include DOCUMENTATION.md
+include RELATORIO_FINAL.md
+include SECURITY.md

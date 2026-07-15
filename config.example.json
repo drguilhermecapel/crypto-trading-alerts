@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "mode": "alert_only",
+  "timezone": "America/Sao_Paulo",
+  "assets": ["BTC", "ETH", "SOL", "XRP", "ADA", "SEI", "APT", "AVAX"],
+  "market": {
+    "base_url": "https://www.okx.com",
+    "price_move_pct": 5.0,
+    "volume_ratio_min": 1.5,
+    "lookback_hours": 24,
+    "volume_baseline_days": 7,
+    "request_timeout_seconds": 12
+  },
+  "news": {
+    "lookback_hours": 30,
+    "minimum_successful_feeds": 1,
+    "feeds": [
+      {
+        "name": "SEC Press Releases",
+        "url": "https://www.sec.gov/news/pressreleases.rss",
+        "required": false
+      },
+      {
+        "name": "CoinDesk",
+        "url": "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "required": false
+      }
+    ]
+  },
+  "risk": {
+    "spot_only": true,
+    "autonomous_trading": false,
+    "max_holdings": 5,
+    "max_asset_weight": 0.4,
+    "risk_per_trade": 0.01,
+    "weekly_loss_cap": -0.06
+  },
+  "delivery": {
+    "send_empty_digest": false,
+    "telegram_enabled": true,
+    "email_enabled": false
+  },
+  "state": {
+    "path": ".state/alerts.json",
+    "dedupe_hours": 168
+  }
+}

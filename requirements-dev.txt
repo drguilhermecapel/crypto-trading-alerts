@@ -1,0 +1,4 @@
+bandit==1.8.6
+build==1.2.2.post1
+pip-audit==2.9.0
+ruff==0.12.2

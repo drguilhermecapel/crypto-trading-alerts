@@ -1,197 +1,136 @@
 # Crypto Trading Alerts
 
-Sistema avançado de alertas de trading de criptomoedas com análise técnica baseada em probabilidades e fórmulas matemáticas para múltiplas exchanges.
+A read-only, once-daily monitor for material developments affecting BTC, ETH, SOL,
+XRP, ADA, SEI, APT, and AVAX. It combines confirmed OKX spot candles with recent
+catalyst headlines and produces an evidence-bearing digest suitable for Telegram,
+e-mail, GitHub Actions artifacts, and local review.
 
-## 🚀 Características
+This is an alerting and decision-support tool. It does not place orders, accept
+exchange credentials, use leverage, or make autonomous investment decisions.
 
-- **Análise Técnica Avançada**: Utiliza múltiplos indicadores técnicos (RSI, MACD, Bollinger Bands, ATR, Stochastic, Awesome Oscillator)
-- **Detecção de Divergências**: Identifica divergências entre preço e indicadores
-- **Múltiplas Exchanges**: Suporte para OKX, Binance, Coinbase, Kraken, Bybit
-- **Sistema de Pontuação**: Algoritmo proprietário que combina múltiplos sinais
-- **Gestão de Risco**: Stop loss e take profit baseados em ATR
-- **Alertas Inteligentes**: Notificações por e-mail e Telegram
-- **Backtesting**: Módulo para validação de estratégias
-- **Modelos Preditivos**: Integração opcional com ARIMA e GARCH
+## What counts as material
 
-## 📊 Indicadores Técnicos
+A market move is emitted only when both conditions are met:
 
-### Indicadores de Tendência
-- **EMA (Exponential Moving Average)**: 20, 50, 200 períodos
-- **SMA (Simple Moving Average)**: Médias móveis simples
-- **Donchian Channel**: Canal de breakout
+- absolute 24-hour return is at least 5.0%; and
+- 24-hour quote volume is at least 1.5 times the median of the previous seven
+  non-overlapping 24-hour periods.
 
-### Indicadores de Momentum
-- **RSI (Relative Strength Index)**: Força relativa
-- **MACD**: Convergência e divergência de médias móveis
-- **ROC (Rate of Change)**: Taxa de mudança
-- **Stochastic Oscillator**: Oscilador estocástico
-- **Awesome Oscillator**: Oscilador de momentum
+The boundary is inclusive: +5.00% or -5.00% with 1.50x volume qualifies. A 4.99%
+move or 1.49x volume does not.
 
-### Indicadores de Volatilidade
-- **Bollinger Bands**: Bandas de volatilidade
-- **ATR (Average True Range)**: Volatilidade média
+Recent RSS/Atom items are classified into six catalyst groups:
 
-## 🔍 Sistema de Pontuação
+1. on-chain or ecosystem acceleration;
+2. exchange or liquidity events;
+3. network upgrades;
+4. outages, exploits, or security incidents;
+5. ETF or institutional catalysts; and
+6. regulatory or legal catalysts.
 
-O sistema utiliza um algoritmo proprietário que combina:
+Low-quality sources cannot independently create a news alert. Each emitted event
+contains the catalyst, evidence URL, source quality, probable market impact, main
+risk, and a technical-versus-fundamental classification. These fields are
+deterministic assessments, not forecasts or guarantees.
 
-```python
-score = (trend_score * 1.5) + (mom_score * 1.2) + (vol_score * 0.8) + 
-        (div_score * 1.5) + (brk_score * 2.0) + (arga_score * 0.5)
-```
+## Source policy
 
-### Classificação dos Sinais
-- **Strong Buy** (Score ≥ 3.0): Sinal de compra forte
-- **Buy** (Score ≥ 1.5): Sinal de compra
-- **Hold** (-1.5 < Score < 1.5): Manter posição
-- **Sell** (Score ≤ -1.5): Sinal de venda
-- **Strong Sell** (Score ≤ -3.0): Sinal de venda forte
+| Source | Use | Quality |
+|---|---|---|
+| OKX public spot candles | Price and quote-volume evidence | High / primary market data |
+| Government and monitored-network official domains | Regulatory, legal, network evidence | High |
+| Established financial/crypto editorial domains | Catalyst discovery | Medium |
+| Unknown domains | Context only; never sufficient alone | Low |
 
-## 🛠️ Instalação
+The default feeds are the official [SEC RSS feed](https://www.sec.gov/about/rss-feeds)
+and [CoinDesk RSS](https://www.coindesk.com/coindesk-news/2021/09/17/coindesk-rss).
+Market data uses the official [OKX public market API](https://www.okx.com/docs-v5/en/).
 
-1. Clone o repositório:
+## Quick start
+
+Python 3.11 or newer is required. Install the pinned hardened XML parser and timezone
+data dependencies before running the monitor.
+
 ```bash
-git clone https://github.com/drguilhermecapel/crypto-trading-alerts.git
-cd crypto-trading-alerts
+python -m pip install -r requirements.txt
+python -m crypto_alerts validate-config --config config.example.json
+python -m unittest discover -s tests -v
+python -m crypto_alerts run --config config.example.json --no-notify
 ```
 
-2. Instale as dependências:
+The compatibility entrypoint remains available:
+
 ```bash
-pip install -r requirements.txt
+python crypto_alerts_updated.py run --config config.example.json --no-notify
 ```
 
-3. Configure as variáveis de ambiente:
+Each run writes a Markdown digest and machine-readable JSON under `artifacts/`.
+When no material event exists, the report says so and no notification is sent by
+default.
+
+## Telegram and e-mail
+
+Set notification credentials only as local environment variables or GitHub Actions
+secrets. Telegram requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. SMTP requires
+`SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, and `SMTP_TO`.
+No secret is written to reports or logs.
+
+The scheduled workflow falls back to artifact-only mode if Telegram secrets are not
+configured. Add the two Telegram secrets in the repository settings to receive the
+digest on the phone.
+
+## Daily schedule and deduplication
+
+`.github/workflows/daily-alerts.yml` runs at 10:00 UTC (07:00 in São Paulo) and can
+also be started manually. State is restored through a GitHub Actions cache. Event IDs
+are suppressed for seven days and at most one digest is delivered per São Paulo
+calendar day unless a manual force flag is used.
+
+If required market data are incomplete, stale, malformed, or unavailable, the run
+fails visibly and does not advance the state. Optional feed failures appear as
+warnings; fewer than the configured minimum successful feeds is a hard failure.
+
+## Advisory risk policy
+
+The optional `check-portfolio` command evaluates a proposed spot allocation without
+placing trades. Its fail-closed defaults are:
+
+| Guardrail | Limit |
+|---|---:|
+| Active crypto holdings | 5 |
+| Weight per asset | 40% |
+| Capital risk per trade | 1% |
+| Weekly loss circuit breaker | Block at -6% or worse |
+| Margin, derivatives, leverage | Prohibited |
+
 ```bash
-# Credenciais da Exchange (exemplo para OKX)
-export OKX_API_KEY="sua_api_key"
-export OKX_API_SECRET="sua_api_secret"
-export OKX_API_PASSWORD="sua_api_password"
-
-# Alertas por E-mail (opcional)
-export EMAIL_ALERTS_ENABLED="true"
-export SMTP_SERVER="smtp.gmail.com"
-export SMTP_PORT="587"
-export FROM_EMAIL="seu_email@gmail.com"
-export TO_EMAIL="destino@gmail.com"
-export EMAIL_PASSWORD="sua_senha_app"
-
-# Alertas por Telegram (opcional)
-export TELEGRAM_ALERTS_ENABLED="true"
-export TELEGRAM_BOT_TOKEN="seu_bot_token"
-export TELEGRAM_CHAT_ID="seu_chat_id"
+python -m crypto_alerts check-portfolio --config config.example.json --portfolio portfolio.example.json
 ```
 
-## 🚀 Uso
+## Example event
 
-### Varredura Básica
-```bash
-python crypto_alerts_updated.py --scan_top --top_n 30 --timeframe 1h
+```json
+{
+  "asset": "SOL",
+  "category": "price_volume",
+  "catalyst": "SOL moved +5.4% over 24 hours with 1.7x quote volume",
+  "evidence_urls": ["https://www.okx.com/api/v5/market/candles?instId=SOL-USDT&bar=1H&limit=193"],
+  "source_quality": "HIGH",
+  "probable_market_impact": "Short-term bullish pressure is plausible while volume remains elevated.",
+  "main_risk": "A high-volume move can reverse; the detector does not identify a fundamental cause.",
+  "technical_vs_fundamental": "technical"
+}
 ```
 
-### Análise de Símbolos Específicos
-```bash
-python crypto_alerts_updated.py --symbols "BTC/USDT,ETH/USDT" --timeframe 1h
-```
+## Limitations
 
-### Com Envio de Ordens (CUIDADO!)
-```bash
-python crypto_alerts_updated.py --symbols "BTC/USDT" --timeframe 1h --capital 1000 --place_orders --risk_per_trade 0.01
-```
+Headline classification is rule-based and cannot verify every underlying claim.
+OKX volume represents one venue, not the entire market. RSS feeds can be delayed or
+unavailable. No performance, predictive-accuracy, or profitability claim is made.
+External delivery is at-least-once: after a rare partial transport failure, retrying
+may duplicate a chunk already accepted by Telegram or one channel. Digest artifacts
+remain the authoritative complete record.
+Review the evidence before acting and use only capital you can afford to lose.
 
-### Parâmetros Principais
-
-- `--exchange`: Exchange a usar (okx, binance, etc.)
-- `--symbols`: Lista de símbolos separados por vírgula
-- `--scan_top`: Varrer os top símbolos por volume
-- `--top_n`: Número de top símbolos (padrão: 20)
-- `--timeframe`: Timeframe (1m, 5m, 15m, 1h, 4h, 1d)
-- `--capital`: Capital disponível em USD
-- `--risk_per_trade`: Risco por trade (0.01 = 1%)
-- `--place_orders`: Enviar ordens reais (USE COM CUIDADO!)
-
-## 📈 Backtesting
-
-O sistema inclui um módulo básico de backtesting:
-
-```python
-from crypto_alerts_updated import run_backtest, composite_signal
-
-# Executar backtest
-results = run_backtest(df, composite_signal, initial_capital=1000.0)
-print(f"Retorno total: {results['total_return']:.2%}")
-```
-
-## 🔐 Segurança
-
-- **Nunca** compartilhe suas chaves de API
-- Use variáveis de ambiente para credenciais
-- Teste sempre em modo simulação antes de usar ordens reais
-- Configure limites de risco apropriados
-
-## 📱 Alertas
-
-### E-mail
-Configure SMTP para receber alertas por e-mail com detalhes completos dos sinais.
-
-### Telegram
-Configure um bot do Telegram para alertas instantâneos no seu celular.
-
-## 🔧 Configuração Avançada
-
-Edite o arquivo `config.yaml` para personalizar:
-- Parâmetros dos indicadores
-- Pesos do sistema de pontuação
-- Configurações de risco
-- Timeframes preferidos
-
-## 📊 Exchanges Suportadas
-
-- **OKX**: Suporte completo com regras específicas
-- **Binance**: Suporte via CCXT
-- **Coinbase**: Suporte via CCXT
-- **Kraken**: Suporte via CCXT
-- **Bybit**: Suporte via CCXT
-
-## 🤖 Modelos Preditivos (Opcional)
-
-Se instaladas as dependências opcionais:
-```bash
-pip install statsmodels arch
-```
-
-O sistema utilizará:
-- **ARIMA**: Para previsão de retornos
-- **GARCH**: Para previsão de volatilidade
-
-## ⚠️ Disclaimer
-
-Este software é fornecido apenas para fins educacionais e de pesquisa. O trading de criptomoedas envolve riscos significativos e você pode perder todo o seu capital. Sempre:
-
-- Faça sua própria pesquisa
-- Teste em ambiente de simulação
-- Use apenas capital que pode perder
-- Considere consultar um consultor financeiro
-
-## 📄 Licença
-
-Este projeto está licenciado sob a licença MIT. Veja o arquivo LICENSE para detalhes.
-
-## 🤝 Contribuições
-
-Contribuições são bem-vindas! Por favor:
-
-1. Faça um fork do projeto
-2. Crie uma branch para sua feature
-3. Commit suas mudanças
-4. Push para a branch
-5. Abra um Pull Request
-
-## 📞 Suporte
-
-Para suporte e dúvidas:
-- Abra uma issue no GitHub
-- Entre em contato via e-mail
-
----
-
-**⚡ Desenvolvido com Python e amor pela análise técnica ⚡**
+This software is educational decision support, not financial advice. Licensed under
+the MIT License.

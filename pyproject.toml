@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crypto-trading-alerts"
+version = "2.0.0"
+description = "Read-only daily monitor for material crypto market and catalyst alerts"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Guilherme Capel"}]
+dependencies = ["defusedxml>=0.7.1,<0.8", "tzdata>=2026.3"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+
+[project.scripts]
+crypto-alerts = "crypto_alerts.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["crypto_alerts*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S603"]
