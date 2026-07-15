@@ -35,6 +35,12 @@
     "risk_per_trade": 0.01,
     "weekly_loss_cap": -0.06
   },
+  "analysis": {
+    "engine": "fuzzy_expert",
+    "openai_enabled": true,
+    "openai_model": "gpt-5.6",
+    "openai_timeout_seconds": 20
+  },
   "delivery": {
     "send_empty_digest": false,
     "telegram_enabled": true,

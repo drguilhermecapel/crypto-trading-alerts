@@ -24,6 +24,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.mode, "alert_only")
         self.assertTrue(config.risk.spot_only)
         self.assertFalse(config.risk.autonomous_trading)
+        self.assertEqual(config.analysis.engine, "fuzzy_expert")
+        self.assertEqual(config.analysis.openai_model, "gpt-5.6")
 
     def test_unknown_keys_and_changed_universe_are_rejected(self) -> None:
         self.base["unexpected"] = True
@@ -73,6 +75,18 @@ class ConfigTests(unittest.TestCase):
             candidate = json.loads(json.dumps(self.base))
             candidate["state"]["path"] = value
             with self.subTest(value=value), self.assertRaises(ConfigError):
+                self.load(candidate)
+
+    def test_analysis_contract_is_strict_and_cannot_enable_execution(self) -> None:
+        for field, value in (
+            ("engine", "black_box_trader"),
+            ("openai_model", "latest"),
+            ("openai_enabled", "yes"),
+            ("openai_timeout_seconds", 31),
+        ):
+            candidate = json.loads(json.dumps(self.base))
+            candidate["analysis"][field] = value
+            with self.subTest(field=field), self.assertRaises(ConfigError):
                 self.load(candidate)
 
 

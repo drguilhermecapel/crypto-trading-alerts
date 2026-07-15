@@ -9,16 +9,25 @@ import math
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .advisor import build_recommendations
 from .config import EXPECTED_SYMBOLS, AppConfig, ConfigError, load_config
 from .engine import combine_events
 from .http import PublicSourceError, fetch_bytes
 from .market import MarketAssessment, MarketDataError, OkxPublicMarketClient
-from .models import AlertEvent, AnalysisType, EventCategory, SourceQuality
+from .models import (
+    AlertEvent,
+    AnalysisType,
+    EventCategory,
+    RecommendationSource,
+    SourceQuality,
+    TokenRecommendation,
+)
 from .news import FeedParseError, news_items_to_events, parse_feed
 from .notify import NotificationConfigError, Notifier
 from .policy import AdvisoryPolicy, PolicyContext
@@ -39,6 +48,15 @@ class RunError(RuntimeError):
 
 class DeliveryError(RuntimeError):
     """Configured external delivery failed after artifacts were written."""
+
+
+@dataclass(frozen=True, slots=True)
+class CollectedData:
+    """Validated inputs retained for both alerts and all-token analysis."""
+
+    events: tuple[AlertEvent, ...]
+    warnings: tuple[str, ...]
+    assessments: tuple[MarketAssessment, ...]
 
 
 def _aware_utc(value: datetime | None = None) -> datetime:
@@ -96,6 +114,13 @@ def _market_event(assessment: MarketAssessment, timezone_name: str) -> AlertEven
             "quote_volume_24h": snapshot.quote_volume_24h,
             "baseline_quote_volume": snapshot.baseline_quote_volume,
             "volume_ratio": snapshot.volume_ratio,
+            "change_72h_pct": snapshot.change_72h_pct,
+            "rsi_14h": snapshot.rsi_14h,
+            "ema_24h": snapshot.ema_24h,
+            "ema_72h": snapshot.ema_72h,
+            "trend_spread_pct": snapshot.trend_spread_pct,
+            "realized_volatility_24h_pct": snapshot.realized_volatility_24h_pct,
+            "drawdown_7d_pct": snapshot.drawdown_7d_pct,
             "price_threshold_met": assessment.price_threshold_met,
             "volume_threshold_met": assessment.volume_threshold_met,
         },
@@ -121,12 +146,13 @@ def _write_digest(
     generated_at: datetime,
     warnings: Sequence[str],
     suppressed: dict[str, int | bool],
+    recommendations: Sequence[TokenRecommendation],
 ) -> tuple[Path, Path, str]:
     directory = Path(output_dir)
-    markdown = render_markdown(events, generated_at)
+    markdown = render_markdown(events, generated_at, recommendations=recommendations)
     if warnings:
         markdown += "\n## Source warnings\n\n" + "\n".join(f"- {item}" for item in warnings) + "\n"
-    payload = build_payload(events, generated_at)
+    payload = build_payload(events, generated_at, recommendations=recommendations)
     payload["warnings"] = list(warnings)
     payload["suppressed"] = suppressed
     json_text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -137,9 +163,10 @@ def _write_digest(
     return markdown_path, json_path, markdown
 
 
-def _collect_events(config: AppConfig, now: datetime) -> tuple[list[AlertEvent], list[str]]:
+def _collect_events(config: AppConfig, now: datetime) -> CollectedData:
     market_client = OkxPublicMarketClient(config.market, clock=lambda: now)
     market_events: list[AlertEvent] = []
+    assessments: list[MarketAssessment] = []
     market_errors: list[str] = []
     for asset in config.assets:
         try:
@@ -147,6 +174,7 @@ def _collect_events(config: AppConfig, now: datetime) -> tuple[list[AlertEvent],
         except MarketDataError as exc:
             market_errors.append(f"{asset.symbol}: {exc}")
             continue
+        assessments.append(assessment)
         if assessment.material:
             market_events.append(_market_event(assessment, config.timezone))
     if market_errors:
@@ -189,7 +217,73 @@ def _collect_events(config: AppConfig, now: datetime) -> tuple[list[AlertEvent],
         now=now,
         lookback_hours=config.news.lookback_hours,
     )
-    return combine_events(market_events, news_events), warnings
+    if tuple(item.snapshot.asset for item in assessments) != EXPECTED_SYMBOLS:
+        raise RunError("market assessment set does not match the fixed asset universe")
+    return CollectedData(
+        events=tuple(combine_events(market_events, news_events)),
+        warnings=tuple(warnings),
+        assessments=tuple(assessments),
+    )
+
+
+def _apply_optional_ai_review(
+    recommendations: Sequence[TokenRecommendation],
+    assessments: Sequence[MarketAssessment],
+    events: Sequence[AlertEvent],
+    config: AppConfig,
+) -> tuple[list[TokenRecommendation], str | None]:
+    """Attach a model's second opinion without changing any effective action or score."""
+
+    if not config.analysis.openai_enabled:
+        return [replace(item, model_status="disabled") for item in recommendations], None
+
+    # Imported lazily so the deterministic engine remains independently usable.
+    from .openai_advisor import review_recommendations
+
+    result = review_recommendations(
+        recommendations,
+        assessments,
+        events,
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        model=config.analysis.openai_model,
+        timeout_seconds=config.analysis.openai_timeout_seconds,
+    )
+    enriched: list[TokenRecommendation] = []
+    for item in recommendations:
+        opinion = result.opinions.get(item.asset)
+        if opinion is None:
+            enriched.append(
+                replace(
+                    item,
+                    model_status=result.status,
+                    model_input_hash=result.input_hash,
+                    prompt_version=result.prompt_version,
+                    model_name=result.model,
+                )
+            )
+            continue
+        agrees = opinion.action is item.action
+        enriched.append(
+            replace(
+                item,
+                model_source=(
+                    RecommendationSource.HYBRID_CONSENSUS
+                    if agrees
+                    else RecommendationSource.FUZZY_EXPERT
+                ),
+                model_action=opinion.action,
+                model_signal_strength=opinion.signal_strength / 100.0,
+                model_rationale=opinion.rationale,
+                model_primary_risk=opinion.primary_risk,
+                model_status="reviewed_agreement" if agrees else "reviewed_disagreement",
+                model_input_hash=result.input_hash,
+                prompt_version=result.prompt_version,
+                model_name=result.model,
+                model_evidence_event_ids=opinion.evidence_event_ids,
+            )
+        )
+    warning = f"AI review unavailable ({result.warning})" if result.warning else None
+    return enriched, warning
 
 
 def _run_monitor(args: argparse.Namespace) -> int:
@@ -197,12 +291,66 @@ def _run_monitor(args: argparse.Namespace) -> int:
     now = _parse_time(args.now)
     state_path = args.state or config.state.path
     store = StateStore(state_path, config.state.dedupe_hours, config.timezone)
+    with store.run_lock():
+        return _run_monitor_locked(args, config, now, store)
+
+
+def _run_monitor_locked(
+    args: argparse.Namespace,
+    config: AppConfig,
+    now: datetime,
+    store: StateStore,
+) -> int:
+    """Run one serialized daily transaction from state check through commit."""
+
     snapshot = store.load()
-    events, warnings = _collect_events(config, now)
+    already_sent_today = store.digest_sent_today(snapshot, now=now)
+    if already_sent_today and not args.force:
+        directory = Path(args.output_dir)
+        receipt_path = directory / "suppressed-run.json"
+        receipt = {
+            "status": "daily_suppressed",
+            "reason": "daily_digest_already_sent",
+            "generated_at": now.isoformat(),
+            "emitted_events": 0,
+            "recommendations": 0,
+            "notified": False,
+            "markdown": str(directory / "digest.md"),
+            "json": str(directory / "digest.json"),
+        }
+        _atomic_text(
+            receipt_path,
+            json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
+        print(json.dumps({**receipt, "suppression_receipt": str(receipt_path)}, sort_keys=True))
+        return EXIT_OK
+
+    collected = _collect_events(config, now)
+    events = list(collected.events)
+    warnings = list(collected.warnings)
+    try:
+        recommendations = build_recommendations(
+            collected.assessments,
+            events,
+            generated_at=now,
+            expected_symbols=EXPECTED_SYMBOLS,
+            max_buy_candidates=config.risk.max_holdings,
+            risk_per_trade_cap_pct=config.risk.risk_per_trade * 100.0,
+            max_asset_weight_pct=config.risk.max_asset_weight * 100.0,
+        )
+    except ValueError as exc:
+        raise RunError(f"cannot build complete recommendations: {exc}") from exc
+    recommendations, ai_warning = _apply_optional_ai_review(
+        recommendations,
+        collected.assessments,
+        events,
+        config,
+    )
+    if ai_warning:
+        warnings.append(ai_warning)
 
     all_ids = [event.event_id for event in events]
     new_ids = set(store.new_event_ids(snapshot, all_ids, now=now))
-    already_sent_today = store.digest_sent_today(snapshot, now=now)
     if args.force:
         selected = events
     elif already_sent_today:
@@ -210,9 +358,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
     else:
         selected = [event for event in events if event.event_id in new_ids]
 
-    should_emit = (args.force or not already_sent_today) and (
-        bool(selected) or config.delivery.send_empty_digest
-    )
+    should_emit = args.force or not already_sent_today
     suppressed = {
         "duplicate_events": len(events)
         - len([event for event in events if event.event_id in new_ids]),
@@ -225,6 +371,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
         now,
         warnings,
         suppressed,
+        recommendations,
     )
 
     notified = False
@@ -234,7 +381,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
             timeout_seconds=config.market.request_timeout_seconds,
         )
         local_day = now.astimezone(ZoneInfo(config.timezone)).date().isoformat()
-        result = notifier.send(f"Material crypto alerts — {local_day}", markdown)
+        result = notifier.send(f"Daily crypto analysis — {local_day}", markdown)
         if not result.success:
             failures = [
                 channel.error_code
@@ -263,6 +410,8 @@ def _run_monitor(args: argparse.Namespace) -> int:
                 "status": "ok",
                 "material_events": len(events),
                 "emitted_events": len(selected),
+                "recommendations": len(recommendations),
+                "ai_review_status": sorted({item.model_status for item in recommendations}),
                 "notified": notified,
                 "markdown": str(markdown_path),
                 "json": str(json_path),

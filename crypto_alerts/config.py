@@ -64,6 +64,16 @@ class RiskConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class AnalysisConfig:
+    """Heuristic engine plus an optional, non-authoritative model review."""
+
+    engine: str
+    openai_enabled: bool
+    openai_model: str
+    openai_timeout_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class DeliveryConfig:
     send_empty_digest: bool
     telegram_enabled: bool
@@ -85,6 +95,7 @@ class AppConfig:
     market: MarketConfig
     news: NewsConfig
     risk: RiskConfig
+    analysis: AnalysisConfig
     delivery: DeliveryConfig
     state: StateConfig
 
@@ -133,7 +144,18 @@ def load_config(path: str | Path) -> AppConfig:
     data = _object(raw, "root")
     _keys(
         data,
-        {"version", "mode", "timezone", "assets", "market", "news", "risk", "delivery", "state"},
+        {
+            "version",
+            "mode",
+            "timezone",
+            "assets",
+            "market",
+            "news",
+            "risk",
+            "analysis",
+            "delivery",
+            "state",
+        },
         "root",
     )
 
@@ -249,6 +271,30 @@ def load_config(path: str | Path) -> AppConfig:
     if risk.spot_only is not True or risk.autonomous_trading is not False:
         raise ConfigError("risk must enforce spot_only=true and autonomous_trading=false")
 
+    analysis_raw = _object(data.get("analysis"), "analysis")
+    _keys(
+        analysis_raw,
+        {"engine", "openai_enabled", "openai_model", "openai_timeout_seconds"},
+        "analysis",
+    )
+    if analysis_raw.get("engine") != "fuzzy_expert":
+        raise ConfigError("analysis.engine must be fuzzy_expert")
+    if not isinstance(analysis_raw.get("openai_enabled"), bool):
+        raise ConfigError("analysis.openai_enabled must be boolean")
+    if analysis_raw.get("openai_model") != "gpt-5.6":
+        raise ConfigError("analysis.openai_model must be gpt-5.6")
+    analysis = AnalysisConfig(
+        engine="fuzzy_expert",
+        openai_enabled=analysis_raw["openai_enabled"],
+        openai_model="gpt-5.6",
+        openai_timeout_seconds=_number(
+            analysis_raw.get("openai_timeout_seconds"),
+            "analysis.openai_timeout_seconds",
+            1.0,
+            30.0,
+        ),
+    )
+
     delivery_raw = _object(data.get("delivery"), "delivery")
     _keys(delivery_raw, {"send_empty_digest", "telegram_enabled", "email_enabled"}, "delivery")
     if not all(
@@ -269,4 +315,15 @@ def load_config(path: str | Path) -> AppConfig:
         state_raw["path"], _integer(state_raw.get("dedupe_hours"), "state.dedupe_hours", 24, 720)
     )
 
-    return AppConfig(1, "alert_only", timezone_name, assets, market, news, risk, delivery, state)
+    return AppConfig(
+        1,
+        "alert_only",
+        timezone_name,
+        assets,
+        market,
+        news,
+        risk,
+        analysis,
+        delivery,
+        state,
+    )
