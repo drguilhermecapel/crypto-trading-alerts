@@ -37,6 +37,21 @@ class MarketConfig:
     lookback_hours: int
     volume_baseline_days: int
     request_timeout_seconds: float
+    binance_base_url: str = "https://data-api.binance.vision"
+
+
+@dataclass(frozen=True, slots=True)
+class UniverseConfig:
+    """Bounded runtime discovery of active public spot markets."""
+
+    mode: str
+    quote_asset: str
+    exchanges: tuple[str, ...]
+    max_assets: int
+    minimum_coverage_ratio: float
+    max_workers: int
+    exclude_stablecoins: bool
+    exclude_leveraged_tokens: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +86,7 @@ class AnalysisConfig:
     openai_enabled: bool
     openai_model: str
     openai_timeout_seconds: float
+    openai_max_assets: int = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +94,7 @@ class DeliveryConfig:
     send_empty_digest: bool
     telegram_enabled: bool
     email_enabled: bool
+    max_markdown_recommendations: int = 24
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +115,7 @@ class AppConfig:
     analysis: AnalysisConfig
     delivery: DeliveryConfig
     state: StateConfig
+    universe: UniverseConfig
 
 
 def _object(value: Any, field: str) -> dict[str, Any]:
@@ -149,6 +167,7 @@ def load_config(path: str | Path) -> AppConfig:
             "mode",
             "timezone",
             "assets",
+            "universe",
             "market",
             "news",
             "risk",
@@ -159,8 +178,8 @@ def load_config(path: str | Path) -> AppConfig:
         "root",
     )
 
-    if data.get("version") != 1:
-        raise ConfigError("version must be 1")
+    if data.get("version") != 2:
+        raise ConfigError("version must be 2")
     if data.get("mode") != "alert_only":
         raise ConfigError("mode must be alert_only; order execution is not supported")
     timezone_name = data.get("timezone")
@@ -183,11 +202,54 @@ def load_config(path: str | Path) -> AppConfig:
         Asset(symbol=s, instrument=f"{s}-USDT", aliases=DEFAULT_ALIASES[s]) for s in symbols
     )
 
+    universe_raw = _object(data.get("universe"), "universe")
+    _keys(
+        universe_raw,
+        {
+            "mode",
+            "quote_asset",
+            "exchanges",
+            "max_assets",
+            "minimum_coverage_ratio",
+            "max_workers",
+            "exclude_stablecoins",
+            "exclude_leveraged_tokens",
+        },
+        "universe",
+    )
+    if universe_raw.get("mode") != "exchange_union":
+        raise ConfigError("universe.mode must be exchange_union")
+    if universe_raw.get("quote_asset") != "USDT":
+        raise ConfigError("universe.quote_asset must be USDT")
+    exchange_values = universe_raw.get("exchanges")
+    if exchange_values != ["okx", "binance"]:
+        raise ConfigError("universe.exchanges must exactly equal ['okx', 'binance']")
+    exclude_stablecoins = universe_raw.get("exclude_stablecoins")
+    exclude_leveraged_tokens = universe_raw.get("exclude_leveraged_tokens")
+    if exclude_stablecoins is not True or exclude_leveraged_tokens is not True:
+        raise ConfigError("universe must exclude stablecoins and leveraged tokens")
+    universe = UniverseConfig(
+        mode="exchange_union",
+        quote_asset="USDT",
+        exchanges=("okx", "binance"),
+        max_assets=_integer(universe_raw.get("max_assets"), "universe.max_assets", 8, 2000),
+        minimum_coverage_ratio=_number(
+            universe_raw.get("minimum_coverage_ratio"),
+            "universe.minimum_coverage_ratio",
+            0.5,
+            1.0,
+        ),
+        max_workers=_integer(universe_raw.get("max_workers"), "universe.max_workers", 1, 16),
+        exclude_stablecoins=True,
+        exclude_leveraged_tokens=True,
+    )
+
     market_raw = _object(data.get("market"), "market")
     _keys(
         market_raw,
         {
             "base_url",
+            "binance_base_url",
             "price_move_pct",
             "volume_ratio_min",
             "lookback_hours",
@@ -211,9 +273,15 @@ def load_config(path: str | Path) -> AppConfig:
         request_timeout_seconds=_number(
             market_raw.get("request_timeout_seconds"), "market.request_timeout_seconds", 1.0, 30.0
         ),
+        binance_base_url=_https_url(market_raw.get("binance_base_url"), "market.binance_base_url"),
     )
     if urlparse(market.base_url).hostname not in {"www.okx.com", "my.okx.com"}:
         raise ConfigError("market.base_url must be an official OKX host")
+    if urlparse(market.binance_base_url).hostname not in {
+        "api.binance.com",
+        "data-api.binance.vision",
+    }:
+        raise ConfigError("market.binance_base_url must be an official Binance host")
 
     news_raw = _object(data.get("news"), "news")
     _keys(news_raw, {"lookback_hours", "minimum_successful_feeds", "feeds"}, "news")
@@ -274,7 +342,13 @@ def load_config(path: str | Path) -> AppConfig:
     analysis_raw = _object(data.get("analysis"), "analysis")
     _keys(
         analysis_raw,
-        {"engine", "openai_enabled", "openai_model", "openai_timeout_seconds"},
+        {
+            "engine",
+            "openai_enabled",
+            "openai_model",
+            "openai_timeout_seconds",
+            "openai_max_assets",
+        },
         "analysis",
     )
     if analysis_raw.get("engine") != "fuzzy_expert":
@@ -293,16 +367,38 @@ def load_config(path: str | Path) -> AppConfig:
             1.0,
             30.0,
         ),
+        openai_max_assets=_integer(
+            analysis_raw.get("openai_max_assets"), "analysis.openai_max_assets", 1, 12
+        ),
     )
 
     delivery_raw = _object(data.get("delivery"), "delivery")
-    _keys(delivery_raw, {"send_empty_digest", "telegram_enabled", "email_enabled"}, "delivery")
+    _keys(
+        delivery_raw,
+        {
+            "send_empty_digest",
+            "telegram_enabled",
+            "email_enabled",
+            "max_markdown_recommendations",
+        },
+        "delivery",
+    )
     if not all(
         isinstance(delivery_raw.get(key), bool)
         for key in ("send_empty_digest", "telegram_enabled", "email_enabled")
     ):
         raise ConfigError("delivery flags must be boolean")
-    delivery = DeliveryConfig(**delivery_raw)
+    delivery = DeliveryConfig(
+        send_empty_digest=delivery_raw["send_empty_digest"],
+        telegram_enabled=delivery_raw["telegram_enabled"],
+        email_enabled=delivery_raw["email_enabled"],
+        max_markdown_recommendations=_integer(
+            delivery_raw.get("max_markdown_recommendations"),
+            "delivery.max_markdown_recommendations",
+            5,
+            50,
+        ),
+    )
 
     state_raw = _object(data.get("state"), "state")
     _keys(state_raw, {"path", "dedupe_hours"}, "state")
@@ -316,14 +412,15 @@ def load_config(path: str | Path) -> AppConfig:
     )
 
     return AppConfig(
-        1,
-        "alert_only",
-        timezone_name,
-        assets,
-        market,
-        news,
-        risk,
-        analysis,
-        delivery,
-        state,
+        version=2,
+        mode="alert_only",
+        timezone=timezone_name,
+        assets=assets,
+        market=market,
+        news=news,
+        risk=risk,
+        analysis=analysis,
+        delivery=delivery,
+        state=state,
+        universe=universe,
     )

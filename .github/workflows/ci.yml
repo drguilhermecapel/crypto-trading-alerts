@@ -41,7 +41,7 @@ jobs:
           python -m crypto_alerts validate-config --config config.example.json
           python -m build
           python -m venv /tmp/crypto-alerts-wheel
-          /tmp/crypto-alerts-wheel/bin/python -m pip install --disable-pip-version-check dist/crypto_trading_alerts-2.1.0-py3-none-any.whl
+          /tmp/crypto-alerts-wheel/bin/python -m pip install --disable-pip-version-check dist/crypto_trading_alerts-3.0.0-py3-none-any.whl
           config_path="$(pwd)/config.example.json"
           (cd /tmp && /tmp/crypto-alerts-wheel/bin/python -c "import crypto_alerts.advisor, crypto_alerts.openai_advisor")
           (cd /tmp && /tmp/crypto-alerts-wheel/bin/crypto-alerts validate-config --config "$config_path")

@@ -22,6 +22,7 @@ ASSET = Asset("BTC", "BTC-USDT", ("BTC", "Bitcoin"))
 def market_config() -> MarketConfig:
     return MarketConfig(
         base_url="https://www.okx.com",
+        binance_base_url="https://api.binance.com",
         price_move_pct=5.0,
         volume_ratio_min=1.5,
         lookback_hours=24,
@@ -162,6 +163,7 @@ class MarketClientTests(unittest.TestCase):
         self.assertGreater(assessment.snapshot.trend_spread_pct, 0.0)
         self.assertGreaterEqual(assessment.snapshot.realized_volatility_24h_pct, 0.0)
         self.assertLessEqual(assessment.snapshot.drawdown_7d_pct, 0.0)
+        self.assertEqual(assessment.snapshot.exchange, "okx")
         expected_observed_at = NOW.replace(minute=0, second=0, microsecond=0)
         self.assertEqual(assessment.snapshot.observed_at, expected_observed_at)
 
@@ -230,17 +232,28 @@ class MarketClientTests(unittest.TestCase):
         with self.assertRaisesRegex(MarketDataError, "stale"):
             client.fetch_snapshot(ASSET)
 
-    def test_non_spot_or_non_allowlisted_instrument_is_rejected_before_io(self) -> None:
+    def test_any_canonical_usdt_asset_is_supported(self) -> None:
+        opener = FakeOpener(candle_rows())
+        client = OkxPublicMarketClient(market_config(), opener=opener, clock=lambda: NOW)
+
+        snapshot = client.fetch_snapshot(Asset("DOGE", "DOGE-USDT", ("DOGE", "Dogecoin")))
+
+        self.assertEqual(snapshot.asset, "DOGE")
+        self.assertEqual(snapshot.instrument, "DOGE-USDT")
+        self.assertEqual(snapshot.exchange, "okx")
+
+    def test_non_spot_or_noncanonical_instrument_is_rejected_before_io(self) -> None:
         opener = FakeOpener(candle_rows())
         client = OkxPublicMarketClient(market_config(), opener=opener, clock=lambda: NOW)
         invalid_assets = (
             Asset("BTC", "BTC-USDT-SWAP", ("BTC",)),
-            Asset("DOGE", "DOGE-USDT", ("DOGE",)),
+            Asset("doge", "doge-USDT", ("doge",)),
+            Asset("DÓGE", "DÓGE-USDT", ("DÓGE",)),
             Asset("BTC", "ETH-USDT", ("BTC",)),
         )
         for asset in invalid_assets:
             with self.subTest(asset=asset):
-                with self.assertRaisesRegex(ValueError, "allowlisted"):
+                with self.assertRaises(ValueError):
                     client.fetch_snapshot(asset)
         self.assertEqual(opener.calls, [])
 

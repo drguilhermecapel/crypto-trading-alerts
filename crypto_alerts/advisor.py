@@ -15,7 +15,6 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
-from .config import EXPECTED_SYMBOLS
 from .market import MarketAssessment
 from .models import (
     AlertEvent,
@@ -150,15 +149,29 @@ def _validate_assessment(assessment: MarketAssessment, expected_symbol: str) -> 
         )
     if snapshot.instrument != f"{expected_symbol}-USDT":
         raise ValueError(f"unexpected instrument for {expected_symbol}")
+    if snapshot.exchange not in {"okx", "binance"}:
+        raise ValueError(f"unexpected exchange for {expected_symbol}")
+    expected_venue_instrument = (
+        f"{expected_symbol}-USDT" if snapshot.exchange == "okx" else f"{expected_symbol}USDT"
+    )
+    if (
+        snapshot.venue_instrument is not None
+        and snapshot.venue_instrument != expected_venue_instrument
+    ):
+        raise ValueError(f"unexpected venue instrument for {expected_symbol}")
     parsed_evidence = (
-        urlparse(assessment.evidence_url)
-        if isinstance(assessment.evidence_url, str)
-        else None
+        urlparse(assessment.evidence_url) if isinstance(assessment.evidence_url, str) else None
     )
     if (
         parsed_evidence is None
         or parsed_evidence.scheme != "https"
-        or parsed_evidence.hostname not in {"www.okx.com", "my.okx.com"}
+        or parsed_evidence.hostname
+        not in {
+            "www.okx.com",
+            "my.okx.com",
+            "api.binance.com",
+            "data-api.binance.vision",
+        }
     ):
         raise ValueError(f"{expected_symbol} assessment must have an official evidence URL")
     _utc(snapshot.observed_at)
@@ -169,9 +182,7 @@ def _validate_assessment(assessment: MarketAssessment, expected_symbol: str) -> 
     )
     if not all(isinstance(value, bool) for value in flags):
         raise ValueError(f"{expected_symbol} materiality flags must be boolean")
-    if assessment.material != (
-        assessment.price_threshold_met and assessment.volume_threshold_met
-    ):
+    if assessment.material != (assessment.price_threshold_met and assessment.volume_threshold_met):
         raise ValueError(f"{expected_symbol} materiality flags are inconsistent")
 
     positive = {
@@ -244,8 +255,7 @@ def _technical_result(assessment: MarketAssessment) -> _TechnicalResult:
     highvol = _clip((snapshot.realized_volatility_24h_pct - 8.0) / 12.0, 0.0, 1.0)
     components = (s24, s72, trend, srsi, sdd)
     weighted_sum = math.fsum(
-        weight * component
-        for weight, component in zip(_TECHNICAL_WEIGHTS, components, strict=True)
+        weight * component for weight, component in zip(_TECHNICAL_WEIGHTS, components, strict=True)
     )
     denominator = math.fsum(
         abs(weight * component)
@@ -505,13 +515,15 @@ def build_recommendations(
 
     symbols = tuple(expected_symbols)
     supplied = tuple(assessments)
-    if symbols != EXPECTED_SYMBOLS:
-        raise ValueError("expected_symbols must equal the fixed eight-token universe")
     if not symbols or any(
-        not isinstance(symbol, str) or not symbol or symbol != symbol.strip().upper()
+        not isinstance(symbol, str)
+        or not re.fullmatch(r"[A-Z0-9]{1,32}", symbol)
+        or symbol != symbol.strip().upper()
         for symbol in symbols
     ):
         raise ValueError("expected_symbols must contain canonical uppercase symbols")
+    if len(symbols) > 2_000:
+        raise ValueError("expected_symbols exceeds the bounded dynamic universe")
     if len(set(symbols)) != len(symbols):
         raise ValueError("expected_symbols must not contain duplicates")
     if len(supplied) != len(symbols):
@@ -570,6 +582,10 @@ def build_recommendations(
             raise ValueError("event source quality does not match its evidence domains")
         seen_event_ids.add(event.event_id)
 
+    events_by_asset: dict[str, list[AlertEvent]] = {symbol: [] for symbol in symbols}
+    for event in event_values:
+        events_by_asset[event.asset].append(event)
+
     recommendations: list[TokenRecommendation] = []
     for assessment, symbol in zip(values, symbols, strict=True):
         _validate_assessment(assessment, symbol)
@@ -578,7 +594,7 @@ def build_recommendations(
         ).total_seconds() / 3600.0
         if snapshot_age_hours < -5.0 / 60.0 or snapshot_age_hours > 2.0:
             raise ValueError("market snapshots must be current and not future-dated")
-        relevant = tuple(event for event in event_values if event.asset == symbol)
+        relevant = tuple(events_by_asset[symbol])
         technical = _technical_result(assessment)
         fundamental = _fundamental_score(relevant, generated)
         outage_veto = any(
@@ -617,6 +633,13 @@ def build_recommendations(
                 generated_at=generated,
                 risk_per_trade_cap_pct=round(risk_cap, 4),
                 max_asset_weight_pct=round(weight_cap, 4),
+                market_exchange=assessment.snapshot.exchange,
+                market_instrument=(
+                    assessment.snapshot.venue_instrument or assessment.snapshot.instrument
+                ),
+                available_exchanges=(
+                    assessment.snapshot.available_exchanges or (assessment.snapshot.exchange,)
+                ),
             )
         )
 

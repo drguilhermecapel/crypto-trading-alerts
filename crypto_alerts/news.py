@@ -420,6 +420,14 @@ def _matched_assets(text: str, assets: Iterable[Asset]) -> tuple[str, ...]:
     matches: list[str] = []
     has_crypto_context = _is_globally_crypto_relevant(text)
     for asset in assets:
+        if asset.aliases == (asset.symbol,):
+            explicit_dynamic_reference = re.search(
+                rf"(?:\${re.escape(asset.symbol)}\b|"
+                rf"\b{re.escape(asset.symbol)}(?:/|-)USDT\b)",
+                text,
+            )
+            if explicit_dynamic_reference is None:
+                continue
         matched = False
         for alias in asset.aliases:
             alias_match = re.search(
@@ -507,10 +515,11 @@ def news_items_to_events(
         if category not in NEWS_CATEGORIES:
             continue
         matched = _matched_assets(text, asset_values)
+        # Generic crypto headlines are global context, not token-specific
+        # evidence.  Replicating one headline to every discovered market would
+        # manufacture fundamental signals and grow quadratically at scale.
         if not matched:
-            if not _is_globally_crypto_relevant(text):
-                continue
-            matched = tuple(asset.symbol for asset in asset_values)
+            continue
         headline_key = _fingerprint_text(normalized_item.title) or f"url:{canonical_url}"
         for symbol in matched:
             grouped[(symbol, category, headline_key)].append(normalized_item)

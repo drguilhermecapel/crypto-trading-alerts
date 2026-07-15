@@ -66,8 +66,7 @@ def collection(events: tuple[AlertEvent, ...] | None = None) -> cli.CollectedDat
             volume_threshold_met=False,
             material=False,
             evidence_url=(
-                "https://www.okx.com/api/v5/market/candles?"
-                f"instId={symbol}-USDT&bar=1H&limit=193"
+                f"https://www.okx.com/api/v5/market/candles?instId={symbol}-USDT&bar=1H&limit=193"
             ),
         )
         for symbol in EXPECTED_SYMBOLS
@@ -205,7 +204,7 @@ class CliTests(unittest.TestCase):
                 json.loads(state.read_text(encoding="utf-8"))["generation"], generation
             )
             payload = json.loads((output / "digest.json").read_text(encoding="utf-8"))
-            self.assertEqual(payload["schema_version"], 2)
+            self.assertEqual(payload["schema_version"], 3)
             self.assertEqual(payload["recommendation_count"], 8)
             self.assertEqual(payload["event_count"], 0)
 
@@ -292,9 +291,7 @@ class CliTests(unittest.TestCase):
             prompt_version="test-v1",
             model="gpt-5.6",
         )
-        with patch(
-            "crypto_alerts.openai_advisor.review_recommendations", return_value=review
-        ):
+        with patch("crypto_alerts.openai_advisor.review_recommendations", return_value=review):
             enriched, warning = cli._apply_optional_ai_review(
                 local, collected.assessments, collected.events, config
             )

@@ -57,8 +57,7 @@ def make_assessment(
         volume_threshold_met=volume_met,
         material=price_met and volume_met,
         evidence_url=(
-            "https://www.okx.com/api/v5/market/candles?"
-            f"instId={symbol}-USDT&bar=1H&limit=193"
+            f"https://www.okx.com/api/v5/market/candles?instId={symbol}-USDT&bar=1H&limit=193"
         ),
     )
 
@@ -115,7 +114,7 @@ def make_event(
 
 
 class AdvisorInputTests(unittest.TestCase):
-    def test_requires_exactly_one_assessment_for_each_of_the_eight_assets(self) -> None:
+    def test_requires_exactly_one_assessment_for_each_runtime_asset(self) -> None:
         self.assertEqual(EXPECTED_SYMBOLS, SYMBOLS)
 
         recommendations = build()
@@ -188,8 +187,8 @@ class AdvisorInputTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "72 hours"):
                 build(events=[old])
 
-        with self.subTest(case="changed-universe"):
-            with self.assertRaisesRegex(ValueError, "fixed eight-token universe"):
+        with self.subTest(case="mismatched-dynamic-universe"):
+            with self.assertRaisesRegex(ValueError, "missing, duplicated, or unexpected"):
                 build_recommendations(
                     universe(),
                     [],
