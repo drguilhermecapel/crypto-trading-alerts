@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crypto-trading-alerts"
-version = "2.0.0"
-description = "Read-only daily monitor for material crypto market and catalyst alerts"
+version = "2.1.0"
+description = "Read-only daily crypto advisor and material market alert monitor"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

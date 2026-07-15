@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import unittest
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
@@ -9,6 +10,7 @@ from crypto_alerts.config import MarketConfig
 from crypto_alerts.market import (
     MarketDataError,
     OkxPublicMarketClient,
+    _realized_volatility_pct,
     meets_material_thresholds,
 )
 from crypto_alerts.models import Asset, MarketSnapshot
@@ -112,6 +114,14 @@ class FakeOpener:
 
 
 class MarketClientTests(unittest.TestCase):
+    def test_realized_volatility_counts_monotonic_log_returns(self) -> None:
+        closes = [100.0 * (1.01**index) for index in range(25)]
+
+        result = _realized_volatility_pct(closes)
+
+        self.assertAlmostEqual(result, math.sqrt(24.0) * math.log(1.01) * 100.0)
+        self.assertGreater(result, 4.0)
+
     def test_extreme_timestamp_is_reported_as_market_data_error(self) -> None:
         row = [str(10**100), "1", "1", "1", "1", "0", "0", "1", "1"]
         with self.assertRaises(MarketDataError):
@@ -146,6 +156,12 @@ class MarketClientTests(unittest.TestCase):
         self.assertAlmostEqual(assessment.snapshot.baseline_quote_volume, 100.0)
         self.assertAlmostEqual(assessment.snapshot.volume_ratio, 1.5)
         self.assertEqual(assessment.snapshot.last_price, 105.0)
+        self.assertAlmostEqual(assessment.snapshot.change_72h_pct, 5.0)
+        self.assertEqual(assessment.snapshot.rsi_14h, 100.0)
+        self.assertGreater(assessment.snapshot.ema_24h, assessment.snapshot.ema_72h)
+        self.assertGreater(assessment.snapshot.trend_spread_pct, 0.0)
+        self.assertGreaterEqual(assessment.snapshot.realized_volatility_24h_pct, 0.0)
+        self.assertLessEqual(assessment.snapshot.drawdown_7d_pct, 0.0)
         expected_observed_at = NOW.replace(minute=0, second=0, microsecond=0)
         self.assertEqual(assessment.snapshot.observed_at, expected_observed_at)
 

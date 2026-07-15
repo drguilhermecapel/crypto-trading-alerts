@@ -84,6 +84,47 @@ def _at_least(value: float, threshold: float) -> bool:
     return value >= threshold or math.isclose(value, threshold, rel_tol=1e-12, abs_tol=1e-12)
 
 
+def _ema(values: list[float], period: int) -> float:
+    """Return a conventional exponentially weighted moving average."""
+
+    if not values or period < 1:
+        raise MarketDataError("EMA requires prices and a positive period")
+    alpha = 2.0 / (period + 1.0)
+    result = values[0]
+    for value in values[1:]:
+        result = alpha * value + (1.0 - alpha) * result
+    return result
+
+
+def _rsi(values: list[float], period: int = 14) -> float:
+    """Calculate bounded RSI from the latest closed-candle changes."""
+
+    if len(values) < period + 1:
+        raise MarketDataError("RSI history is incomplete")
+    changes = [current - previous for previous, current in zip(values, values[1:], strict=False)]
+    recent = changes[-period:]
+    gains = math.fsum(max(change, 0.0) for change in recent) / period
+    losses = math.fsum(max(-change, 0.0) for change in recent) / period
+    if gains == 0 and losses == 0:
+        return 50.0
+    if losses == 0:
+        return 100.0
+    return 100.0 - (100.0 / (1.0 + gains / losses))
+
+
+def _realized_volatility_pct(values: list[float], hours: int = 24) -> float:
+    """Return square-root-of-summed-squares realized volatility, in percent."""
+
+    if len(values) < hours + 1:
+        raise MarketDataError("volatility history is incomplete")
+    recent = values[-(hours + 1) :]
+    returns = [
+        math.log(current / previous)
+        for previous, current in zip(recent[:-1], recent[1:], strict=True)
+    ]
+    return math.sqrt(math.fsum(value**2 for value in returns)) * 100.0
+
+
 class OkxPublicMarketClient:
     """Injectable, standard-library-only client for confirmed OKX 1H candles."""
 
@@ -165,7 +206,7 @@ class OkxPublicMarketClient:
         return tuple(candles)
 
     def fetch_snapshot(self, asset: Asset) -> MarketSnapshot:
-        """Calculate rolling price and quote-volume metrics from closed candles."""
+        """Calculate explainable technical features from confirmed closed candles."""
 
         candles = self.fetch_candles(asset)
         lookback = self._config.lookback_hours
@@ -187,7 +228,29 @@ class OkxPublicMarketClient:
         last_price = current[-1].close
         change_pct = ((last_price / starting_price) - 1.0) * 100.0
         volume_ratio = current_volume / baseline_volume
-        metrics = (current_volume, starting_price, last_price, change_pct, volume_ratio)
+        closes = [candle.close for candle in candles]
+        change_72h_pct = ((last_price / candles[-72].open) - 1.0) * 100.0
+        ema_24h = _ema(closes, 24)
+        ema_72h = _ema(closes, 72)
+        trend_spread_pct = ((ema_24h / ema_72h) - 1.0) * 100.0
+        rsi_14h = _rsi(closes)
+        realized_volatility = _realized_volatility_pct(closes)
+        seven_day_high = max(candle.high for candle in candles[-168:])
+        drawdown_7d_pct = ((last_price / seven_day_high) - 1.0) * 100.0
+        metrics = (
+            current_volume,
+            starting_price,
+            last_price,
+            change_pct,
+            volume_ratio,
+            change_72h_pct,
+            ema_24h,
+            ema_72h,
+            trend_spread_pct,
+            rsi_14h,
+            realized_volatility,
+            drawdown_7d_pct,
+        )
         if not all(math.isfinite(value) for value in metrics):
             raise MarketDataError("calculated market metrics must be finite")
 
@@ -200,6 +263,13 @@ class OkxPublicMarketClient:
             quote_volume_24h=current_volume,
             baseline_quote_volume=baseline_volume,
             volume_ratio=volume_ratio,
+            change_72h_pct=change_72h_pct,
+            rsi_14h=rsi_14h,
+            ema_24h=ema_24h,
+            ema_72h=ema_72h,
+            trend_spread_pct=trend_spread_pct,
+            realized_volatility_24h_pct=realized_volatility,
+            drawdown_7d_pct=drawdown_7d_pct,
         )
 
     def assess(self, asset: Asset) -> MarketAssessment:

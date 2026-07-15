@@ -306,21 +306,35 @@ class StateStore:
         return result
 
     @contextmanager
+    def run_lock(self) -> Iterator[None]:
+        """Prevent concurrent monitor runs from delivering the same daily digest."""
+
+        with self._named_lock("run"):
+            yield
+
+    @contextmanager
     def _commit_lock(self) -> Iterator[None]:
         """Hold a non-blocking process lock across compare-and-replace."""
 
+        with self._named_lock("lock"):
+            yield
+
+    @contextmanager
+    def _named_lock(self, suffix: str) -> Iterator[None]:
+        """Hold one named non-blocking process lock next to the state file."""
+
         parent = self.path.parent
-        lock_path = parent / f".{self.path.name}.lock"
+        lock_path = parent / f".{self.path.name}.{suffix}"
         try:
             parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
         except OSError as exc:
-            raise StateError("cannot prepare state commit lock") from exc
+            raise StateError("cannot prepare state operation lock") from exc
         try:
             try:
                 self._lock_descriptor(descriptor)
             except OSError as exc:
-                raise StateConflictError("another state commit is already in progress") from exc
+                raise StateConflictError("another state operation is already in progress") from exc
             yield
         finally:
             with suppress(OSError):
@@ -374,7 +388,9 @@ class StateStore:
 
         temporary_path = Path(temporary_name)
         try:
-            os.fchmod(descriptor, 0o600)
+            fchmod = getattr(os, "fchmod", None)
+            if callable(fchmod):
+                fchmod(descriptor, 0o600)
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(encoded)
                 handle.flush()

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from crypto_alerts.state import (
     StateConflictError,
@@ -120,6 +122,11 @@ class StateStoreTests(unittest.TestCase):
         with self.store._commit_lock(), self.assertRaises(StateConflictError):
             self.store.commit(snapshot, event_ids=("second",), now=self.now)
 
+    def test_run_lock_rejects_a_concurrent_monitor_transaction(self) -> None:
+        with self.store.run_lock(), self.assertRaises(StateConflictError):
+            with self.store.run_lock():
+                self.fail("a concurrent run lock must not be acquired")
+
     def test_commit_is_atomic_and_leaves_no_temporary_file(self) -> None:
         self.store.commit(StateSnapshot(), event_ids=("event-a",), now=self.now)
         self.store.commit(self.store.load(), event_ids=("event-b",), now=self.now)
@@ -129,6 +136,12 @@ class StateStoreTests(unittest.TestCase):
             {"event-a", "event-b"},
         )
         self.assertEqual(list(self.path.parent.glob(f".{self.path.name}.*.tmp")), [])
+
+    def test_atomic_write_does_not_require_fchmod(self) -> None:
+        with patch.object(os, "fchmod", None, create=True):
+            self.store.commit(StateSnapshot(), event_ids=("portable",), now=self.now)
+
+        self.assertTrue(self.path.exists())
 
     def test_invalid_identifiers_and_naive_times_are_rejected_without_writing(self) -> None:
         snapshot = self.store.load()
