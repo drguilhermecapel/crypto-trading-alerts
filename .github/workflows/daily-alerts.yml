@@ -1,0 +1,98 @@
+name: Daily material crypto alerts
+
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Deliver again even if today's digest was already emitted
+        required: false
+        type: boolean
+        default: false
+      no_notify:
+        description: Generate artifacts without Telegram or e-mail delivery
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-material-crypto-alerts
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime dependency
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Restore alert state
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        with:
+          path: .state
+          key: crypto-alert-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            crypto-alert-state-
+
+      - name: Validate before monitoring
+        run: |
+          python -m crypto_alerts validate-config --config config.example.json
+          python -m unittest discover -s tests
+
+      - name: Run daily monitor
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+          FORCE_INPUT: ${{ inputs.force || 'false' }}
+          NO_NOTIFY_INPUT: ${{ inputs.no_notify || 'false' }}
+        shell: bash
+        run: |
+          args=(run --config config.example.json --output-dir artifacts)
+          delivery_ready=$(python - <<'PY'
+          import json
+          import os
+
+          with open("config.example.json", encoding="utf-8") as handle:
+              delivery = json.load(handle)["delivery"]
+          readiness = []
+          if delivery["telegram_enabled"]:
+              readiness.append(all(os.environ.get(name) for name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")))
+          if delivery["email_enabled"]:
+              readiness.append(all(os.environ.get(name) for name in ("SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM", "SMTP_TO")))
+          print("true" if readiness and all(readiness) else "false")
+          PY
+          )
+          if [[ "$FORCE_INPUT" == "true" ]]; then args+=(--force); fi
+          if [[ "$NO_NOTIFY_INPUT" == "true" || "$delivery_ready" != "true" ]]; then
+            args+=(--no-notify)
+            echo "Configured notification credentials absent or disabled; producing artifacts only."
+          fi
+          python -m crypto_alerts "${args[@]}"
+
+      - name: Upload digest
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: material-crypto-alerts-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30

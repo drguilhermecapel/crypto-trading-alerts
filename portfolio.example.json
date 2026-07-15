@@ -1,0 +1,13 @@
+{
+  "market_type": "spot",
+  "leverage": 1,
+  "risk_per_trade": 0.01,
+  "weekly_return": 0.0,
+  "positions": [
+    {"symbol": "BTC", "weight": 0.30},
+    {"symbol": "ETH", "weight": 0.25},
+    {"symbol": "SOL", "weight": 0.20},
+    {"symbol": "XRP", "weight": 0.15},
+    {"symbol": "ADA", "weight": 0.10}
+  ]
+}
