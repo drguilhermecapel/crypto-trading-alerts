@@ -184,15 +184,23 @@ class CatalystClassificationTests(unittest.TestCase):
         )
         self.assertEqual(news_items_to_events([low, stale, spoofed], ASSETS, NOW, 30), [])
 
-    def test_global_crypto_catalyst_maps_only_to_the_fixed_universe(self) -> None:
+    def test_global_crypto_catalyst_is_not_fanned_out_to_every_token(self) -> None:
         events = news_items_to_events(
             [self._item("Court issues regulatory ruling for cryptocurrency markets", 3)],
             ASSETS,
             NOW,
             30,
         )
-        self.assertEqual({event.asset for event in events}, set(DEFAULT_ALIASES))
-        self.assertEqual({event.category for event in events}, {EventCategory.REGULATORY_LEGAL})
+        self.assertEqual(events, [])
+
+    def test_dynamic_ticker_requires_dollar_or_explicit_usdt_pair(self) -> None:
+        dynamic = (Asset("ONE", "ONE-USDT", ("ONE",)),)
+        bare = self._item("ONE network upgrade ships for the crypto ecosystem", 30)
+        explicit = self._item("$ONE network upgrade ships for the crypto ecosystem", 31)
+
+        self.assertEqual(news_items_to_events([bare], dynamic, NOW, 30), [])
+        events = news_items_to_events([explicit], dynamic, NOW, 30)
+        self.assertEqual(tuple(item.asset for item in events), ("ONE",))
 
     def test_lowercase_apt_word_does_not_match_the_apt_ticker(self) -> None:
         item = NewsItem(

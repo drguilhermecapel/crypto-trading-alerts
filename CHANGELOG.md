@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.0.0 - 2026-07-15
+
+- Replaced the fixed recommendation universe with bounded daily discovery of the active
+  spot-USDT union on OKX and Binance.
+- Added strict exchange metadata parsers, deterministic cross-venue deduplication,
+  stablecoin/leveraged-token filters, source counts, and a universe audit hash.
+- Added a public Binance hourly-candle client and per-token OKX-to-Binance fallback without
+  combining candle histories from different venues.
+- Added bounded concurrent collection, mandatory core coverage, configurable global
+  coverage, and explicit `NOT_RATED` records for unavailable non-core tokens.
+- Generalized the fuzzy advisor to arbitrary canonical universes while preserving the
+  global maximum of five BUY candidates and every non-execution invariant.
+- Limited the optional OpenAI second opinion to a deterministic dynamic shortlist of at
+  most 12 tokens; every other token retains its local result and an explicit review status.
+- Upgraded the complete JSON artifact to schema v3 with universe and venue metadata, while
+  bounding the human Markdown digest for safe notification delivery.
+- Removed generic-news fan-out across the token universe and added discovery, Binance,
+  scale, fallback, and dynamic-model tests.
+
 ## 2.1.0 - 2026-07-15
 
 - Added an explainable fuzzy expert recommendation for every allowlisted token on

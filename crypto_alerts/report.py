@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
-from .config import EXPECTED_SYMBOLS
 from .engine import sort_events
 from .models import AlertEvent, TokenRecommendation
 
@@ -66,16 +65,15 @@ def build_payload(
 
     generated = _utc(generated_at or datetime.now(UTC))
     alerts = [event_payload(event) for event in sort_events(events)]
-    asset_order = {symbol: index for index, symbol in enumerate(EXPECTED_SYMBOLS)}
     advice = [
         recommendation_payload(item)
         for item in sorted(
             recommendations,
-            key=lambda item: (asset_order.get(item.asset, len(asset_order)), item.asset),
+            key=lambda item: item.asset,
         )
     ]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": generated.isoformat(),
         "recommendation_count": len(advice),
         "recommendations": advice,
@@ -111,8 +109,19 @@ def render_markdown(
     generated_at: datetime | None = None,
     *,
     recommendations: Iterable[TokenRecommendation] = (),
+    max_recommendations: int = 24,
+    max_alerts: int = 20,
 ) -> str:
-    """Render a readable digest while retaining every contractual field."""
+    """Render a bounded human digest; JSON retains the complete universe."""
+
+    if isinstance(max_recommendations, bool) or not isinstance(max_recommendations, int):
+        raise ValueError("max_recommendations must be an integer")
+    if not 1 <= max_recommendations <= 100:
+        raise ValueError("max_recommendations must be between 1 and 100")
+    if isinstance(max_alerts, bool) or not isinstance(max_alerts, int):
+        raise ValueError("max_alerts must be an integer")
+    if not 1 <= max_alerts <= 100:
+        raise ValueError("max_alerts must be between 1 and 100")
 
     payload = build_payload(events, generated_at, recommendations=recommendations)
     lines = [
@@ -128,7 +137,20 @@ def render_markdown(
         "HOLD": "HOLD / MANTER",
         "REDUCE": "REDUCE / REDUZIR",
         "SELL": "SELL / VENDER",
+        "NOT_RATED": "NOT RATED / SEM DADOS",
     }
+    action_counts: dict[str, int] = {}
+    for item in payload["recommendations"]:
+        action_counts[item["action"]] = action_counts.get(item["action"], 0) + 1
+    ranked = sorted(
+        payload["recommendations"],
+        key=lambda item: (
+            item["action"] in {"HOLD", "NOT_RATED"},
+            -abs(item["score"]),
+            item["asset"],
+        ),
+    )
+    displayed = ranked[:max_recommendations]
     lines.extend(
         (
             "",
@@ -138,9 +160,13 @@ def render_markdown(
             "probability of profit. BUY is a non-actionable candidate until portfolio "
             "limits are checked; REDUCE/SELL applies only to an existing position and "
             "never means opening a short.",
+            "The complete recommendation set is retained in digest.json; this human "
+            "digest is intentionally bounded.",
+            "Action totals: "
+            + ", ".join(f"{action}={count}" for action, count in sorted(action_counts.items())),
         )
     )
-    if payload["recommendations"]:
+    if displayed:
         lines.extend(
             (
                 "",
@@ -148,14 +174,18 @@ def render_markdown(
                 "|---|---|---:|---:|---|",
             )
         )
-        for item in payload["recommendations"]:
+        for item in displayed:
             label = action_labels.get(item["action"], item["action"])
             lines.append(
                 f"| {item['asset']} | {label} | {item['signal_strength']:.0%} | "
                 f"{item['score']:+.1f} | {item['model_source']} |"
             )
 
-        for item in payload["recommendations"]:
+        omitted = len(payload["recommendations"]) - len(displayed)
+        if omitted:
+            lines.extend(("", f"_Details omitted here for {omitted} tokens; see digest.json._"))
+
+        for item in displayed:
             label = action_labels.get(item["action"], item["action"])
             lines.extend(
                 (
@@ -169,6 +199,15 @@ def render_markdown(
                     f"- Effective / model action: `{item['action']}` / "
                     f"`{item['model_action'] or 'unavailable'}`",
                     f"- AI review status: `{item['model_status']}`",
+                    f"- Analysis status: `{item['analysis_status']}`"
+                    + (
+                        f" — {_one_line(item['analysis_reason'])}"
+                        if item["analysis_reason"]
+                        else ""
+                    ),
+                    f"- Market source: `{item['market_exchange'] or 'unavailable'}` "
+                    f"(`{item['market_instrument'] or 'unavailable'}`); "
+                    "available: `" + (", ".join(item["available_exchanges"]) or "none") + "`",
                     f"- AI model / prompt: `{item['model_name'] or 'unavailable'}` / "
                     f"`{item['prompt_version'] or 'unavailable'}`",
                     f"- AI input hash: `{item['model_input_hash'] or 'unavailable'}`",
@@ -180,9 +219,7 @@ def render_markdown(
                     ),
                     "- AI-cited event IDs: "
                     + (
-                        ", ".join(
-                            f"`{value}`" for value in item["model_evidence_event_ids"]
-                        )
+                        ", ".join(f"`{value}`" for value in item["model_evidence_event_ids"])
                         if item["model_evidence_event_ids"]
                         else "none"
                     ),
@@ -192,7 +229,9 @@ def render_markdown(
                 )
             )
             if item["evidence_urls"]:
-                lines.extend(f"  - {url}" for url in item["evidence_urls"])
+                lines.extend(f"  - {url}" for url in item["evidence_urls"][:5])
+                if len(item["evidence_urls"]) > 5:
+                    lines.append("  - Additional evidence URLs are in digest.json")
             else:
                 lines.append("  - None supplied")
             metrics = json.dumps(
@@ -211,7 +250,11 @@ def render_markdown(
         lines.extend(("", "No qualifying material events were found."))
         return "\n".join(lines) + "\n"
 
-    for alert in payload["alerts"]:
+    visible_alerts = payload["alerts"][:max_alerts]
+    omitted_alerts = len(payload["alerts"]) - len(visible_alerts)
+    if omitted_alerts:
+        lines.extend(("", f"_{omitted_alerts} additional material alerts are in digest.json._"))
+    for alert in visible_alerts:
         lines.extend(
             (
                 "",
@@ -228,7 +271,7 @@ def render_markdown(
             )
         )
         if alert["evidence_urls"]:
-            lines.extend(f"  - {url}" for url in alert["evidence_urls"])
+            lines.extend(f"  - {url}" for url in alert["evidence_urls"][:5])
         else:
             lines.append("  - None supplied")
         metrics = json.dumps(alert["metrics"], ensure_ascii=False, sort_keys=True, allow_nan=False)

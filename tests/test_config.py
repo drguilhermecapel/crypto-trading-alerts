@@ -18,7 +18,7 @@ class ConfigTests(unittest.TestCase):
             path.write_text(json.dumps(value), encoding="utf-8")
             return load_config(path)
 
-    def test_default_config_has_exact_fixed_universe_and_safety_mode(self) -> None:
+    def test_default_config_has_exact_mandatory_core_and_dynamic_safety_mode(self) -> None:
         config = self.load(self.base)
         self.assertEqual(tuple(asset.symbol for asset in config.assets), EXPECTED_SYMBOLS)
         self.assertEqual(config.mode, "alert_only")
@@ -26,6 +26,7 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config.risk.autonomous_trading)
         self.assertEqual(config.analysis.engine, "fuzzy_expert")
         self.assertEqual(config.analysis.openai_model, "gpt-5.6")
+        self.assertEqual(config.universe.exchanges, ("okx", "binance"))
 
     def test_unknown_keys_and_changed_universe_are_rejected(self) -> None:
         self.base["unexpected"] = True

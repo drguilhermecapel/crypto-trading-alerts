@@ -1,13 +1,14 @@
-"""Read-only OKX spot market data with fail-closed validation.
+"""Read-only spot market data with fail-closed validation.
 
-Only the public candlestick endpoint is exposed.  This module intentionally has
-no credential fields and no order-related methods.
+Only public OKX and Binance candlestick endpoints are exposed.  This module
+intentionally has no credential fields and no order-related methods.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -17,15 +18,27 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from .config import EXPECTED_SYMBOLS, MarketConfig
+from .config import MarketConfig
 from .models import Asset, Candle, MarketSnapshot
 
 ONE_HOUR = timedelta(hours=1)
 MINIMUM_HISTORY_HOURS = 8 * 24
 MAX_OKX_CANDLES = 300
+MAX_BINANCE_CANDLES = 1_000
 MAX_RESPONSE_BYTES = 2_000_000
 OKX_PUBLIC_HOSTS = frozenset({"www.okx.com", "my.okx.com"})
-ALLOWED_INSTRUMENTS = frozenset(f"{symbol}-USDT" for symbol in EXPECTED_SYMBOLS)
+BINANCE_PUBLIC_HOSTS = frozenset(
+    {
+        "api.binance.com",
+        "api-gcp.binance.com",
+        "api1.binance.com",
+        "api2.binance.com",
+        "api3.binance.com",
+        "api4.binance.com",
+        "data-api.binance.vision",
+    }
+)
+CANONICAL_SYMBOL = re.compile(r"[A-Z0-9]{1,32}\Z", flags=re.ASCII)
 
 
 class MarketDataError(RuntimeError):
@@ -46,6 +59,29 @@ class _Response(Protocol):
 
 OpenUrl = Callable[..., _Response]
 Clock = Callable[[], datetime]
+
+
+def _loads_strict_json(raw: bytes, exchange: str) -> Any:
+    def reject_constant(value: str) -> Any:
+        del value
+        raise ValueError("non-finite JSON number")
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(
+            raw.decode("utf-8"),
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicates,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise MarketDataError(f"{exchange} returned invalid JSON") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +161,110 @@ def _realized_volatility_pct(values: list[float], hours: int = 24) -> float:
     return math.sqrt(math.fsum(value**2 for value in returns)) * 100.0
 
 
+def _validate_usdt_asset(asset: Asset) -> None:
+    """Accept a canonical ASCII base symbol paired exactly with spot USDT."""
+
+    if not isinstance(asset, Asset):
+        raise ValueError("asset must be an Asset")
+    if CANONICAL_SYMBOL.fullmatch(asset.symbol) is None:
+        raise ValueError("asset symbol must be 1-32 uppercase ASCII letters or digits")
+    if asset.instrument != f"{asset.symbol}-USDT":
+        raise ValueError("only canonical SYMBOL-USDT spot instruments are supported")
+
+
+def _validate_series(candles: list[Candle], clock: Clock) -> None:
+    if not candles:
+        raise MarketDataError("confirmed candle history is empty")
+    for previous, current in zip(candles, candles[1:], strict=False):
+        if current.opened_at - previous.opened_at != ONE_HOUR:
+            raise MarketDataError("confirmed candle history contains a gap")
+
+    now = clock()
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise MarketDataError("market clock must return a timezone-aware datetime")
+    now = now.astimezone(UTC)
+    latest_close = candles[-1].opened_at + ONE_HOUR
+    if latest_close > now:
+        raise MarketDataError("latest confirmed candle has not closed yet")
+    if now - latest_close > ONE_HOUR:
+        raise MarketDataError("latest confirmed candle is stale")
+
+
+def _snapshot_from_candles(
+    asset: Asset,
+    candles: tuple[Candle, ...],
+    config: MarketConfig,
+    *,
+    exchange: str,
+) -> MarketSnapshot:
+    """Calculate exchange-neutral technical features from closed 1H candles."""
+
+    lookback = config.lookback_hours
+    baseline_count = lookback * config.volume_baseline_days
+    calculation = candles[-(baseline_count + lookback) :]
+    baseline = calculation[:baseline_count]
+    current = calculation[baseline_count:]
+
+    daily_volumes = [
+        math.fsum(candle.quote_volume for candle in baseline[offset : offset + lookback])
+        for offset in range(0, baseline_count, lookback)
+    ]
+    baseline_volume = float(median(daily_volumes))
+    if not math.isfinite(baseline_volume) or baseline_volume <= 0:
+        raise MarketDataError("baseline quote volume must be positive and finite")
+
+    current_volume = math.fsum(candle.quote_volume for candle in current)
+    starting_price = current[0].open
+    last_price = current[-1].close
+    change_pct = ((last_price / starting_price) - 1.0) * 100.0
+    volume_ratio = current_volume / baseline_volume
+    closes = [candle.close for candle in candles]
+    change_72h_pct = ((last_price / candles[-72].open) - 1.0) * 100.0
+    ema_24h = _ema(closes, 24)
+    ema_72h = _ema(closes, 72)
+    trend_spread_pct = ((ema_24h / ema_72h) - 1.0) * 100.0
+    rsi_14h = _rsi(closes)
+    realized_volatility = _realized_volatility_pct(closes)
+    seven_day_high = max(candle.high for candle in candles[-168:])
+    drawdown_7d_pct = ((last_price / seven_day_high) - 1.0) * 100.0
+    metrics = (
+        current_volume,
+        starting_price,
+        last_price,
+        change_pct,
+        volume_ratio,
+        change_72h_pct,
+        ema_24h,
+        ema_72h,
+        trend_spread_pct,
+        rsi_14h,
+        realized_volatility,
+        drawdown_7d_pct,
+    )
+    if not all(math.isfinite(value) for value in metrics):
+        raise MarketDataError("calculated market metrics must be finite")
+
+    return MarketSnapshot(
+        asset=asset.symbol,
+        instrument=asset.instrument,
+        observed_at=current[-1].opened_at + ONE_HOUR,
+        last_price=last_price,
+        change_24h_pct=change_pct,
+        quote_volume_24h=current_volume,
+        baseline_quote_volume=baseline_volume,
+        volume_ratio=volume_ratio,
+        change_72h_pct=change_72h_pct,
+        rsi_14h=rsi_14h,
+        ema_24h=ema_24h,
+        ema_72h=ema_72h,
+        trend_spread_pct=trend_spread_pct,
+        realized_volatility_24h_pct=realized_volatility,
+        drawdown_7d_pct=drawdown_7d_pct,
+        exchange=exchange,
+        venue_instrument=(asset.instrument if exchange == "okx" else f"{asset.symbol}USDT"),
+    )
+
+
 class OkxPublicMarketClient:
     """Injectable, standard-library-only client for confirmed OKX 1H candles."""
 
@@ -180,9 +320,9 @@ class OkxPublicMarketClient:
         payload = self._get_json(url)
         rows = payload.get("data")
         if payload.get("code") != "0" or not isinstance(rows, list):
-            message = payload.get("msg")
-            suffix = f": {message}" if isinstance(message, str) and message else ""
-            raise MarketDataError(f"OKX returned an unsuccessful candle response{suffix}")
+            raise MarketDataError("OKX returned an unsuccessful candle response")
+        if len(rows) > self._request_limit:
+            raise MarketDataError("OKX returned more candles than requested")
 
         confirmed: list[Candle] = []
         seen_timestamps: set[datetime] = set()
@@ -209,68 +349,7 @@ class OkxPublicMarketClient:
         """Calculate explainable technical features from confirmed closed candles."""
 
         candles = self.fetch_candles(asset)
-        lookback = self._config.lookback_hours
-        baseline_count = lookback * self._config.volume_baseline_days
-        calculation = candles[-(baseline_count + lookback) :]
-        baseline = calculation[:baseline_count]
-        current = calculation[baseline_count:]
-
-        daily_volumes = [
-            math.fsum(candle.quote_volume for candle in baseline[offset : offset + lookback])
-            for offset in range(0, baseline_count, lookback)
-        ]
-        baseline_volume = float(median(daily_volumes))
-        if not math.isfinite(baseline_volume) or baseline_volume <= 0:
-            raise MarketDataError("baseline quote volume must be positive and finite")
-
-        current_volume = math.fsum(candle.quote_volume for candle in current)
-        starting_price = current[0].open
-        last_price = current[-1].close
-        change_pct = ((last_price / starting_price) - 1.0) * 100.0
-        volume_ratio = current_volume / baseline_volume
-        closes = [candle.close for candle in candles]
-        change_72h_pct = ((last_price / candles[-72].open) - 1.0) * 100.0
-        ema_24h = _ema(closes, 24)
-        ema_72h = _ema(closes, 72)
-        trend_spread_pct = ((ema_24h / ema_72h) - 1.0) * 100.0
-        rsi_14h = _rsi(closes)
-        realized_volatility = _realized_volatility_pct(closes)
-        seven_day_high = max(candle.high for candle in candles[-168:])
-        drawdown_7d_pct = ((last_price / seven_day_high) - 1.0) * 100.0
-        metrics = (
-            current_volume,
-            starting_price,
-            last_price,
-            change_pct,
-            volume_ratio,
-            change_72h_pct,
-            ema_24h,
-            ema_72h,
-            trend_spread_pct,
-            rsi_14h,
-            realized_volatility,
-            drawdown_7d_pct,
-        )
-        if not all(math.isfinite(value) for value in metrics):
-            raise MarketDataError("calculated market metrics must be finite")
-
-        return MarketSnapshot(
-            asset=asset.symbol,
-            instrument=asset.instrument,
-            observed_at=current[-1].opened_at + ONE_HOUR,
-            last_price=last_price,
-            change_24h_pct=change_pct,
-            quote_volume_24h=current_volume,
-            baseline_quote_volume=baseline_volume,
-            volume_ratio=volume_ratio,
-            change_72h_pct=change_72h_pct,
-            rsi_14h=rsi_14h,
-            ema_24h=ema_24h,
-            ema_72h=ema_72h,
-            trend_spread_pct=trend_spread_pct,
-            realized_volatility_24h_pct=realized_volatility,
-            drawdown_7d_pct=drawdown_7d_pct,
-        )
+        return _snapshot_from_candles(asset, candles, self._config, exchange="okx")
 
     def assess(self, asset: Asset) -> MarketAssessment:
         """Fetch a snapshot and apply the configured inclusive thresholds."""
@@ -289,7 +368,7 @@ class OkxPublicMarketClient:
     def _get_json(self, url: str) -> dict[str, Any]:
         request = Request(  # noqa: S310 - evidence_url validates the official HTTPS host.
             url,
-            headers={"Accept": "application/json", "User-Agent": "crypto-alerts/2.0"},
+            headers={"Accept": "application/json", "User-Agent": "crypto-alerts/3.0"},
             method="GET",
         )
         try:
@@ -307,23 +386,14 @@ class OkxPublicMarketClient:
 
         if len(raw) > MAX_RESPONSE_BYTES:
             raise MarketDataError("OKX response exceeds the size limit")
-        try:
-            decoded = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise MarketDataError("OKX returned invalid JSON") from exc
+        decoded = _loads_strict_json(raw, "OKX")
         if not isinstance(decoded, dict):
             raise MarketDataError("OKX response root must be an object")
         return decoded
 
     @staticmethod
     def _validate_asset(asset: Asset) -> None:
-        expected = f"{asset.symbol}-USDT"
-        if (
-            asset.symbol not in EXPECTED_SYMBOLS
-            or asset.instrument not in ALLOWED_INSTRUMENTS
-            or asset.instrument != expected
-        ):
-            raise ValueError("only allowlisted SYMBOL-USDT spot instruments are supported")
+        _validate_usdt_asset(asset)
 
     @staticmethod
     def _row_timestamp(row: object, index: int) -> datetime:
@@ -382,27 +452,211 @@ class OkxPublicMarketClient:
         return result
 
     def _validate_series(self, candles: list[Candle]) -> None:
-        for previous, current in zip(candles, candles[1:], strict=False):
-            if current.opened_at - previous.opened_at != ONE_HOUR:
-                raise MarketDataError("confirmed candle history contains a gap")
+        _validate_series(candles, self._clock)
 
+
+class BinancePublicMarketClient:
+    """Injectable, public-only Binance client for closed spot-USDT 1H klines."""
+
+    def __init__(
+        self,
+        config: MarketConfig,
+        *,
+        opener: OpenUrl = urlopen,
+        clock: Clock | None = None,
+    ) -> None:
+        # ``binance_base_url`` is part of the expanded MarketConfig contract.
+        # The fallback keeps this client importable during migration from the
+        # original OKX-only configuration.
+        base_url = getattr(config, "binance_base_url", "https://data-api.binance.vision")
+        parsed = urlparse(base_url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in BINANCE_PUBLIC_HOSTS
+            or parsed.username
+            or parsed.password
+        ):
+            raise ValueError("Binance base URL must be an official credential-free HTTPS URL")
+        if config.lookback_hours != 24:
+            raise ValueError("market lookback must be exactly 24 hours")
+        if config.volume_baseline_days != 7:
+            raise ValueError("volume baseline must contain exactly seven daily blocks")
+        requested_hours = max(
+            MINIMUM_HISTORY_HOURS,
+            config.lookback_hours * (config.volume_baseline_days + 1),
+        )
+        if requested_hours + 1 > MAX_BINANCE_CANDLES:
+            raise ValueError("requested history exceeds the Binance public endpoint limit")
+
+        self._config = config
+        self._base_url = base_url.rstrip("/")
+        self._opener = opener
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._history_hours = requested_hours
+        self._request_limit = requested_hours + 1
+
+    def evidence_url(self, asset: Asset) -> str:
+        """Return the exact public Binance kline URL used as evidence."""
+
+        _validate_usdt_asset(asset)
+        query = urlencode(
+            {
+                "symbol": f"{asset.symbol}USDT",
+                "interval": "1h",
+                "limit": str(self._request_limit),
+            }
+        )
+        return f"{self._base_url}/api/v3/klines?{query}"
+
+    def fetch_candles(self, asset: Asset) -> tuple[Candle, ...]:
+        """Fetch and validate the latest closed Binance hourly candle history."""
+
+        url = self.evidence_url(asset)
+        rows = self._get_json(url)
+        if not isinstance(rows, list):
+            raise MarketDataError("Binance candle response root must be an array")
+        if len(rows) > self._request_limit:
+            raise MarketDataError("Binance returned more candles than requested")
+
+        now = self._utc_now()
+        confirmed: list[Candle] = []
+        seen_timestamps: set[datetime] = set()
+        for index, row in enumerate(rows):
+            opened_at = self._row_timestamp(row, index)
+            if opened_at in seen_timestamps:
+                raise MarketDataError(f"duplicate candle timestamp at row {index}")
+            seen_timestamps.add(opened_at)
+            candle = self._parse_row(row, index, now=now)
+            if candle is not None:
+                confirmed.append(candle)
+
+        confirmed.sort(key=lambda item: item.opened_at)
+        if len(confirmed) < self._history_hours:
+            raise MarketDataError(
+                f"expected at least {self._history_hours} closed 1H candles, "
+                f"received {len(confirmed)}"
+            )
+        candles = confirmed[-self._history_hours :]
+        _validate_series(candles, self._clock)
+        return tuple(candles)
+
+    def fetch_snapshot(self, asset: Asset) -> MarketSnapshot:
+        """Calculate explainable technical features from closed Binance klines."""
+
+        candles = self.fetch_candles(asset)
+        return _snapshot_from_candles(asset, candles, self._config, exchange="binance")
+
+    def assess(self, asset: Asset) -> MarketAssessment:
+        """Fetch a snapshot and apply the configured inclusive thresholds."""
+
+        snapshot = self.fetch_snapshot(asset)
+        price_met = _at_least(abs(snapshot.change_24h_pct), self._config.price_move_pct)
+        volume_met = _at_least(snapshot.volume_ratio, self._config.volume_ratio_min)
+        return MarketAssessment(
+            snapshot=snapshot,
+            price_threshold_met=price_met,
+            volume_threshold_met=volume_met,
+            material=price_met and volume_met,
+            evidence_url=self.evidence_url(asset),
+        )
+
+    def _get_json(self, url: str) -> Any:
+        request = Request(  # noqa: S310 - evidence_url fixes an official HTTPS host.
+            url,
+            headers={"Accept": "application/json", "User-Agent": "crypto-alerts/3.0"},
+            method="GET",
+        )
+        try:
+            with self._opener(request, timeout=self._config.request_timeout_seconds) as response:
+                status = getattr(response, "status", 200)
+                if status != 200:
+                    raise MarketDataError(f"Binance returned HTTP {status}")
+                final_url = getattr(response, "geturl", lambda: url)()
+                if urlparse(final_url).hostname not in BINANCE_PUBLIC_HOSTS:
+                    raise MarketDataError("Binance request redirected to a non-official host")
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            raise MarketDataError(f"cannot fetch Binance public candles: {exc}") from exc
+
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise MarketDataError("Binance response exceeds the size limit")
+        return _loads_strict_json(raw, "Binance")
+
+    def _utc_now(self) -> datetime:
         now = self._clock()
         if now.tzinfo is None or now.utcoffset() is None:
             raise MarketDataError("market clock must return a timezone-aware datetime")
-        now = now.astimezone(UTC)
-        latest_close = candles[-1].opened_at + ONE_HOUR
-        if latest_close > now:
-            raise MarketDataError("latest confirmed candle has not closed yet")
-        if now - latest_close > ONE_HOUR:
-            raise MarketDataError("latest confirmed candle is stale")
+        return now.astimezone(UTC)
+
+    @classmethod
+    def _row_timestamp(cls, row: object, index: int) -> datetime:
+        if not isinstance(row, list) or len(row) < 8:
+            raise MarketDataError(f"candle row {index} must contain at least 8 fields")
+        timestamp_ms = cls._integer_milliseconds(row[0], index, 0)
+        if timestamp_ms <= 0 or timestamp_ms % 3_600_000 != 0:
+            raise MarketDataError(f"candle row {index} is not aligned to a UTC hour")
+        try:
+            return datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise MarketDataError(
+                f"candle row {index} timestamp is outside the supported range"
+            ) from exc
+
+    @classmethod
+    def _parse_row(
+        cls,
+        row: object,
+        index: int,
+        *,
+        now: datetime,
+    ) -> Candle | None:
+        opened_at = cls._row_timestamp(row, index)
+        row_values = cast(list[object], row)
+        opened_ms = cls._integer_milliseconds(row_values[0], index, 0)
+        closed_ms = cls._integer_milliseconds(row_values[6], index, 6)
+        if closed_ms != opened_ms + 3_600_000 - 1:
+            raise MarketDataError(f"candle row {index} has an invalid close time")
+        if closed_ms >= int(now.timestamp() * 1000):
+            return None
+
+        values = [
+            OkxPublicMarketClient._number(row_values[position], index, position)
+            for position in (1, 2, 3, 4, 7)
+        ]
+        open_price, high, low, close, quote_volume = values
+        if min(open_price, high, low, close) <= 0:
+            raise MarketDataError(f"candle row {index} prices must be positive")
+        if quote_volume < 0:
+            raise MarketDataError(f"candle row {index} quote volume cannot be negative")
+        if high < max(open_price, low, close) or low > min(open_price, high, close):
+            raise MarketDataError(f"candle row {index} has inconsistent OHLC bounds")
+        return Candle(opened_at, open_price, high, low, close, quote_volume)
+
+    @staticmethod
+    def _integer_milliseconds(value: object, row: int, position: int) -> int:
+        if isinstance(value, bool):
+            raise MarketDataError(f"candle row {row} field {position} must be integer milliseconds")
+        try:
+            result = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MarketDataError(
+                f"candle row {row} field {position} must be integer milliseconds"
+            ) from exc
+        if str(result) != str(value):
+            raise MarketDataError(f"candle row {row} field {position} must be integer milliseconds")
+        return result
 
 
 # Conventional initialism spelling for callers that prefer it.
 OKXPublicMarketClient = OkxPublicMarketClient
+BinanceMarketClient = BinancePublicMarketClient
 
 
 __all__ = [
-    "ALLOWED_INSTRUMENTS",
+    "BINANCE_PUBLIC_HOSTS",
+    "BinanceMarketClient",
+    "BinancePublicMarketClient",
+    "CANONICAL_SYMBOL",
     "MarketAssessment",
     "MarketDataError",
     "OKXPublicMarketClient",

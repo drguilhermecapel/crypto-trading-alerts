@@ -38,6 +38,7 @@ class RecommendationAction(StrEnum):
     HOLD = "HOLD"
     REDUCE = "REDUCE"
     SELL = "SELL"
+    NOT_RATED = "NOT_RATED"
 
 
 class RecommendationSource(StrEnum):
@@ -81,6 +82,9 @@ class MarketSnapshot:
     trend_spread_pct: float = 0.0
     realized_volatility_24h_pct: float = 0.0
     drawdown_7d_pct: float = 0.0
+    exchange: str = "okx"
+    available_exchanges: tuple[str, ...] = ()
+    venue_instrument: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +161,12 @@ class TokenRecommendation:
     max_asset_weight_pct: float = 40.0
     advisory_only: bool = True
     execution_allowed: bool = False
+    analysis_status: str = "analyzed"
+    analysis_reason: str | None = None
+    market_exchange: str | None = None
+    market_instrument: str | None = None
+    available_exchanges: tuple[str, ...] = ()
+    universe_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         generated = self.generated_at
@@ -190,4 +200,10 @@ class TokenRecommendation:
             "max_asset_weight_pct": self.max_asset_weight_pct,
             "advisory_only": self.advisory_only,
             "execution_allowed": self.execution_allowed,
+            "analysis_status": self.analysis_status,
+            "analysis_reason": self.analysis_reason,
+            "market_exchange": self.market_exchange,
+            "market_instrument": self.market_instrument,
+            "available_exchanges": list(self.available_exchanges),
+            "universe_hash": self.universe_hash,
         }

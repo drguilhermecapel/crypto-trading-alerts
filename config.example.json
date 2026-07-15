@@ -1,10 +1,21 @@
 {
-  "version": 1,
+  "version": 2,
   "mode": "alert_only",
   "timezone": "America/Sao_Paulo",
   "assets": ["BTC", "ETH", "SOL", "XRP", "ADA", "SEI", "APT", "AVAX"],
+  "universe": {
+    "mode": "exchange_union",
+    "quote_asset": "USDT",
+    "exchanges": ["okx", "binance"],
+    "max_assets": 2000,
+    "minimum_coverage_ratio": 0.9,
+    "max_workers": 8,
+    "exclude_stablecoins": true,
+    "exclude_leveraged_tokens": true
+  },
   "market": {
     "base_url": "https://www.okx.com",
+    "binance_base_url": "https://data-api.binance.vision",
     "price_move_pct": 5.0,
     "volume_ratio_min": 1.5,
     "lookback_hours": 24,
@@ -39,12 +50,14 @@
     "engine": "fuzzy_expert",
     "openai_enabled": true,
     "openai_model": "gpt-5.6",
-    "openai_timeout_seconds": 20
+    "openai_timeout_seconds": 20,
+    "openai_max_assets": 12
   },
   "delivery": {
     "send_empty_digest": false,
     "telegram_enabled": true,
-    "email_enabled": false
+    "email_enabled": false,
+    "max_markdown_recommendations": 24
   },
   "state": {
     "path": ".state/alerts.json",
